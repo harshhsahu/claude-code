@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhatsApp Relay</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #646b78; --line: #e3e6eb;
+    --accent: #1f7a5c; --accent-text: #ffffff; --ok: #1f7a5c; --warn: #a15c00; --bad: #b42318; --info: #2754c5;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --text: #e7e9ee; --muted: #9aa1ad; --line: #272b34;
+      --accent: #3fb68b; --accent-text: #0b1210; --ok: #3fb68b; --warn: #e0a043; --bad: #f0706a; --info: #7aa2ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 650; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .pill { font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .live { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
+  .dot.on { background: var(--ok); }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-bottom: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  .card .v { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+  .card .s { color: var(--muted); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
+  .stat .n { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .l { color: var(--muted); font-size: 12px; }
+  .cols { display: grid; gap: 12px; grid-template-columns: 1fr 1.4fr; align-items: start; }
+  textarea { width: 100%; min-height: 110px; resize: vertical; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+             background: var(--bg); color: var(--text); font: inherit; }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  button { font: inherit; font-weight: 600; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel);
+           color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button:disabled { opacity: .55; cursor: default; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .result { font-size: 13px; margin-top: 10px; min-height: 1.5em; overflow-wrap: anywhere; }
+  .result.ok { color: var(--ok); } .result.bad { color: var(--bad); }
+  a { color: var(--info); }
+  ol.feed { list-style: none; margin: 0; padding: 0; max-height: 560px; overflow: auto; }
+  .feed li { border-top: 1px solid var(--line); padding: 10px 0; }
+  .feed li:first-child { border-top: 0; }
+  .meta { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); }
+  .tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 1px 7px; border-radius: 4px; border: 1px solid currentColor; }
+  .t-received { color: var(--info); } .t-forwarded { color: var(--ok); } .t-reply { color: var(--ok); }
+  .t-ignored { color: var(--warn); } .t-unparsed { color: var(--warn); } .t-error { color: var(--bad); }
+  .body { margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  pre { margin: 6px 0 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font: 12px/1.45 var(--mono);
+        white-space: pre-wrap; overflow-wrap: anywhere; }
+  .empty { color: var(--muted); padding: 20px 0; text-align: center; }
+  @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>WhatsApp ⇄ Claude relay</h1>
+    <span class="pill" id="mode">…</span>
+    <span class="live"><span class="dot" id="dot"></span><span id="live">connecting</span></span>
+  </header>
+
+  <section class="grid">
+    <div class="card"><h2>Claude session</h2><div class="v" id="session">…</div><div class="s" id="sessionSub"></div></div>
+    <div class="card"><h2>MSG91</h2><div class="v" id="msg91">…</div><div class="s" id="msg91Sub"></div></div>
+    <div class="card"><h2>Allowed numbers</h2><div class="v" id="allowed">…</div><div class="s">Messages from anyone else are ignored</div></div>
+    <div class="card"><h2>Webhook</h2><div class="v" id="webhook">…</div><div class="s" id="webhookSub"></div></div>
+  </section>
+
+  <section class="stats">
+    <div class="card stat"><div class="n" id="s-received">0</div><div class="l">received</div></div>
+    <div class="card stat"><div class="n" id="s-forwarded">0</div><div class="l">sent to Claude</div></div>
+    <div class="card stat"><div class="n" id="s-ignored">0</div><div class="l">ignored</div></div>
+    <div class="card stat"><div class="n" id="s-errors">0</div><div class="l">errors</div></div>
+  </section>
+
+  <section class="cols">
+    <div class="card">
+      <h2>Command</h2>
+      <textarea id="text" placeholder="e.g. run the test suite and open a PR fixing failures"></textarea>
+      <div class="row">
+        <button class="primary" id="sendClaude">Send to Claude</button>
+        <button id="sendWa">Send as test WhatsApp</button>
+      </div>
+      <div class="result" id="result"></div>
+      <p class="note">“Send to Claude” goes through the same path as a WhatsApp message, so Claude replies on your phone.
+        “Send as test WhatsApp” only checks MSG91 sending. ⌘/Ctrl + Enter sends to Claude.</p>
+    </div>
+
+    <div class="card">
+      <h2>Activity</h2>
+      <ol class="feed" id="feed"><li class="empty">Nothing yet. Send <b>/ping</b> from WhatsApp.</li></ol>
+      <p class="note">Claude’s own replies go straight from the cloud session to WhatsApp, so they don’t show here.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const ago = (ts) => {
+  if (!ts) return 'never';
+  const s = Math.round((Date.now() - ts) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+};
+let stats = {};
+let lastWebhookAt = null;
+
+function renderStats() {
+  for (const k of ['received', 'forwarded', 'ignored', 'errors']) $(`s-${k}`).textContent = stats[k] ?? 0;
+  $('webhookSub').textContent = `Last call from MSG91: ${ago(lastWebhookAt)}`;
+}
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+const LABELS = { received: 'in', forwarded: 'to claude', reply: 'sent', ignored: 'ignored', unparsed: 'unparsed', error: 'error' };
+
+function addEvent(e) {
+  const feed = $('feed');
+  feed.querySelector('.empty')?.remove();
+  const li = el('li');
+  const meta = el('div', 'meta');
+  meta.append(el('span', `tag t-${e.type}`, LABELS[e.type] || e.type), el('span', null, fmtTime(e.ts)));
+  const who = e.from || e.to;
+  if (who) meta.append(el('span', null, `+${who}`));
+  if (e.source === 'dashboard') meta.append(el('span', null, 'from dashboard'));
+  li.append(meta);
+  if (e.text) li.append(el('div', 'body', e.text));
+  if (e.url) { const a = el('a', null, 'open session ↗'); a.href = e.url; a.target = '_blank'; a.rel = 'noopener'; li.append(a); }
+  if (e.error) li.append(el('pre', null, e.error));
+  if (e.raw) {
+    li.append(el('div', 'body', 'Could not find sender + text in this payload. Paste it to Claude to fix the parser:'));
+    li.append(el('pre', null, e.raw));
+  }
+  feed.prepend(li);
+  while (feed.children.length > 200) feed.lastChild.remove();
+}
+
+function bump(e) {
+  const map = { received: 'received', ignored: 'ignored', forwarded: 'forwarded', error: 'errors' };
+  if (e.type === 'ignored') stats.received = (stats.received || 0) + 1;
+  if (e.type === 'received') stats.received = (stats.received || 0) + 1;
+  if (map[e.type] && e.type !== 'received') stats[map[e.type]] = (stats[map[e.type]] || 0) + 1;
+  if (e.type === 'received' || e.type === 'ignored' || e.type === 'unparsed') lastWebhookAt = e.ts;
+  renderStats();
+}
+
+async function load() {
+  const s = await (await fetch('/api/state')).json();
+  $('mode').textContent = `mode: ${s.mode}`;
+  if (s.session) {
+    $('session').textContent = s.session;
+    const a = el('a', null, 'Open in claude.ai ↗'); a.href = s.sessionUrl; a.target = '_blank'; a.rel = 'noopener';
+    $('sessionSub').replaceChildren(a);
+  } else {
+    $('session').textContent = 'New session per message';
+    $('sessionSub').textContent = 'Routine mode';
+  }
+  $('msg91').textContent = s.msg91 ? 'Configured' : 'Missing authkey or number';
+  $('msg91').style.color = s.msg91 ? 'var(--ok)' : 'var(--bad)';
+  $('msg91Sub').textContent = s.businessNumber ? `Business number ${s.businessNumber}` : 'Set MSG91_AUTHKEY and MSG91_INTEGRATED_NUMBER';
+  $('allowed').textContent = s.allowed.join(', ');
+  $('webhook').textContent = `:${s.webhookPort}${s.webhookPath}`;
+  stats = s.stats; lastWebhookAt = s.stats.lastWebhookAt;
+  renderStats();
+  $('feed').replaceChildren();
+  if (!s.events.length) $('feed').append(el('li', 'empty', 'Nothing yet. Send /ping from WhatsApp.'));
+  s.events.forEach(addEvent);
+}
+
+function connect() {
+  const es = new EventSource('/api/events');
+  es.onopen = () => { $('dot').classList.add('on'); $('live').textContent = 'live'; };
+  es.onerror = () => { $('dot').classList.remove('on'); $('live').textContent = 'relay offline, retrying'; };
+  es.onmessage = (m) => { const e = JSON.parse(m.data); addEvent(e); bump(e); };
+}
+
+async function post(path, okMsg) {
+  const text = $('text').value.trim();
+  const out = $('result');
+  if (!text) { out.className = 'result bad'; out.textContent = 'Type something first.'; return; }
+  for (const b of document.querySelectorAll('button')) b.disabled = true;
+  out.className = 'result'; out.textContent = 'Sending…';
+  try {
+    const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-relay-ui': '1' }, body: JSON.stringify({ text }) });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || r.statusText);
+    out.className = 'result ok'; out.textContent = okMsg;
+    if (body.url) { out.append(' '); const a = el('a', null, 'open session ↗'); a.href = body.url; a.target = '_blank'; a.rel = 'noopener'; out.append(a); }
+    $('text').value = '';
+  } catch (e) {
+    out.className = 'result bad'; out.textContent = `Failed: ${e.message}`;
+  } finally {
+    for (const b of document.querySelectorAll('button')) b.disabled = false;
+  }
+}
+
+$('sendClaude').onclick = () => post('/api/command', '✓ Sent to Claude. The reply will arrive on WhatsApp.');
+$('sendWa').onclick = () => post('/api/test-whatsapp', '✓ Sent. Check your phone.');
+$('text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) $('sendClaude').click(); });
+setInterval(renderStats, 5000);
+load().then(connect).catch(() => { $('live').textContent = 'relay offline'; connect(); });
+</script>
+</body>
+</html>

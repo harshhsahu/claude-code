@@ -44,6 +44,14 @@ Send `/ping` from your phone. Then send something real, like "run the test suite
 
 On the first real message, check the `DEBUG` log. The payload parser covers both MSG91 webhook formats I could find, but it hasn't been tested against a live account. If it logs `no inbound text found`, adjust `extract()` in `relay/server.js` to match the payload.
 
+## Local dashboard
+While the relay runs, open **http://127.0.0.1:8081**. It shows:
+- Status: session link, MSG91 config, allowed numbers, when MSG91 last called the webhook
+- A live activity feed: incoming messages, what went to Claude, ignored senders, errors, and the raw payload of any message the parser couldn't read
+- A command box that sends to Claude through the same path as WhatsApp, plus a button that sends a test WhatsApp message
+
+It only listens on `127.0.0.1` and refuses requests with any other `Host` header. **Never tunnel port 8081**: anyone who reaches it can send commands to Claude without passing the WhatsApp allowlist.
+
 ## Modes
 | | `MODE=session` | `MODE=routine` |
 |---|---|---|
