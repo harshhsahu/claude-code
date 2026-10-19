@@ -1,0 +1,10 @@
+{
+  "name": "wa-claude-bridge",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "relay": "node relay/server.js",
+    "reply": "node tools/wa-reply.mjs"
+  }
+}
