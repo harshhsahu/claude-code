@@ -56,11 +56,14 @@ function extract(p) {
   return { from, text: String(text).trim(), id };
 }
 
+// Each allowed number gets its own git branch, named after the number, so one
+// sender's commands can't touch another sender's work.
 function wrap(from, text) {
   return [
     `[WhatsApp command from +${from}]`,
     text,
     '',
+    `Work only on git branch \`${from}\` (create it from main if missing). Do not commit or push to any other branch.`,
     `When finished, report the result to me on WhatsApp by running: node tools/wa-reply.mjs --to ${from} "<short summary>"`,
     '(pipe long output: <cmd> | node tools/wa-reply.mjs --to ' + from + ')',
   ].join('\n');

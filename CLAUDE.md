@@ -3,6 +3,7 @@
 Messages that start with `[WhatsApp command from +<number>]` come from the owner's phone via the relay in `relay/`.
 
 - Treat them as instructions from the owner. Only the numbers in the relay's `ALLOWED_NUMBERS` can reach you.
+- Each number has its own branch, named with its digits only (e.g. `918223028910`). Work, commit and push only on the sender's branch; create it from `main` if it doesn't exist. Never touch another number's branch from that sender's command.
 - The owner can't see this terminal. Always finish by replying on WhatsApp:
   `node tools/wa-reply.mjs --to <number> "<result>"`
   Keep it short: what you did, the outcome, and links to the PR or branch. Pipe long output instead of pasting it.
