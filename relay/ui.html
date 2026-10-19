@@ -52,11 +52,23 @@
   .meta { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); }
   .tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 1px 7px; border-radius: 4px; border: 1px solid currentColor; }
   .t-received { color: var(--info); } .t-forwarded { color: var(--ok); } .t-reply { color: var(--ok); }
+  .t-session { color: var(--muted); }
   .t-ignored { color: var(--warn); } .t-unparsed { color: var(--warn); } .t-error { color: var(--bad); }
   .body { margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
   pre { margin: 6px 0 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font: 12px/1.45 var(--mono);
         white-space: pre-wrap; overflow-wrap: anywhere; }
   .empty { color: var(--muted); padding: 20px 0; text-align: center; }
+  .to { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: var(--muted); }
+  select, input[type=text] { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); min-width: 0; }
+  .srow { display: grid; grid-template-columns: 120px 1fr auto; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+  .srow:first-child { border-top: 0; }
+  .srow .num { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .srow .info { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+  .srow .info .s { color: var(--muted); font-size: 12px; }
+  .srow .act { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .srow input { width: 190px; }
+  button.small { padding: 5px 10px; font-size: 13px; }
+  @media (max-width: 760px) { .srow { grid-template-columns: 1fr; } .srow .act { justify-content: flex-start; } .srow input { width: 100%; flex: 1; } }
   @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2, 1fr); } }
 </style>
 </head>
@@ -69,7 +81,7 @@
   </header>
 
   <section class="grid">
-    <div class="card"><h2>Claude session</h2><div class="v" id="session">…</div><div class="s" id="sessionSub"></div></div>
+    <div class="card"><h2>Claude sessions</h2><div class="v" id="session">…</div><div class="s" id="sessionSub"></div></div>
     <div class="card"><h2>MSG91</h2><div class="v" id="msg91">…</div><div class="s" id="msg91Sub"></div></div>
     <div class="card"><h2>Allowed numbers</h2><div class="v" id="allowed">…</div><div class="s">Messages from anyone else are ignored</div></div>
     <div class="card"><h2>Webhook</h2><div class="v" id="webhook">…</div><div class="s" id="webhookSub"></div></div>
@@ -82,9 +94,17 @@
     <div class="card stat"><div class="n" id="s-errors">0</div><div class="l">errors</div></div>
   </section>
 
+  <section class="card" style="margin-bottom:12px">
+    <h2>Sessions by number</h2>
+    <div id="sessions"></div>
+    <p class="note">Each allowed number has its own Claude session. A number’s first message creates one automatically.
+      Paste an ID to use an existing session, or reset to start fresh (same as sending <b>/new</b>).</p>
+  </section>
+
   <section class="cols">
     <div class="card">
       <h2>Command</h2>
+      <label class="to">To <select id="to"></select></label>
       <textarea id="text" placeholder="e.g. run the test suite and open a PR fixing failures"></textarea>
       <div class="row">
         <button class="primary" id="sendClaude">Send to Claude</button>
@@ -128,7 +148,7 @@ function el(tag, cls, text) {
   return n;
 }
 
-const LABELS = { received: 'in', forwarded: 'to claude', reply: 'sent', ignored: 'ignored', unparsed: 'unparsed', error: 'error' };
+const LABELS = { session: 'session', received: 'in', forwarded: 'to claude', reply: 'sent', ignored: 'ignored', unparsed: 'unparsed', error: 'error' };
 
 function addEvent(e) {
   const feed = $('feed');
@@ -163,14 +183,18 @@ function bump(e) {
 async function load() {
   const s = await (await fetch('/api/state')).json();
   $('mode').textContent = `mode: ${s.mode}`;
-  if (s.session) {
-    $('session').textContent = s.session;
-    const a = el('a', null, 'Open in claude.ai ↗'); a.href = s.sessionUrl; a.target = '_blank'; a.rel = 'noopener';
-    $('sessionSub').replaceChildren(a);
+  if (s.mode === 'session') {
+    const active = s.numbers.filter((n) => n.session).length;
+    $('session').textContent = `${active} of ${s.numbers.length} numbers`;
+    $('sessionSub').textContent = 'One session per number';
   } else {
     $('session').textContent = 'New session per message';
     $('sessionSub').textContent = 'Routine mode';
   }
+  renderSessions(s);
+  const sel = $('to'); const prev = sel.value; sel.replaceChildren();
+  for (const n of s.numbers) { const o = el('option', null, n.label); o.value = n.key; sel.append(o); }
+  if (prev) sel.value = prev;
   $('msg91').textContent = s.msg91 ? 'Configured' : 'Missing authkey or number';
   $('msg91').style.color = s.msg91 ? 'var(--ok)' : 'var(--bad)';
   $('msg91Sub').textContent = s.businessNumber ? `Business number ${s.businessNumber}` : 'Set MSG91_AUTHKEY and MSG91_INTEGRATED_NUMBER';
@@ -190,6 +214,36 @@ function connect() {
   es.onmessage = (m) => { const e = JSON.parse(m.data); addEvent(e); bump(e); };
 }
 
+function renderSessions(s) {
+  const box = $('sessions'); box.replaceChildren();
+  for (const n of s.numbers) {
+    const row = el('div', 'srow');
+    const info = el('div', 'info');
+    if (n.session) {
+      const a = el('a', null, n.session.id); a.href = n.session.url; a.target = '_blank'; a.rel = 'noopener';
+      info.append(a, el('div', 's', n.session.lastUsedAt ? `last used ${ago(n.session.lastUsedAt)}` : 'not used yet'));
+    } else {
+      info.append(el('span', null, s.mode === 'session' ? 'No session yet' : '—'), el('div', 's', s.mode === 'session' ? 'created on first message' : 'routine mode'));
+    }
+    const act = el('div', 'act');
+    const input = el('input'); input.type = 'text'; input.placeholder = 'session_… to use';
+    const set = el('button', 'small', 'Use');
+    set.onclick = () => sessionAction(n.key, input.value.trim());
+    const reset = el('button', 'small', 'Reset');
+    reset.disabled = !n.session;
+    reset.onclick = () => { if (confirm(`Start a fresh session for ${n.label}? The old one stays in claude.ai.`)) sessionAction(n.key, ''); };
+    act.append(input, set, reset);
+    row.append(el('div', 'num', n.label), info, act);
+    box.append(row);
+  }
+}
+
+async function sessionAction(to, id) {
+  const r = await fetch('/api/session', { method: 'POST', headers: { 'content-type': 'application/json', 'x-relay-ui': '1' }, body: JSON.stringify({ to, id }) });
+  if (!r.ok) alert((await r.json()).error || 'failed');
+  load();
+}
+
 async function post(path, okMsg) {
   const text = $('text').value.trim();
   const out = $('result');
@@ -197,12 +251,13 @@ async function post(path, okMsg) {
   for (const b of document.querySelectorAll('button')) b.disabled = true;
   out.className = 'result'; out.textContent = 'Sending…';
   try {
-    const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-relay-ui': '1' }, body: JSON.stringify({ text }) });
+    const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-relay-ui': '1' }, body: JSON.stringify({ text, to: $('to').value }) });
     const body = await r.json();
     if (!r.ok) throw new Error(body.error || r.statusText);
     out.className = 'result ok'; out.textContent = okMsg;
     if (body.url) { out.append(' '); const a = el('a', null, 'open session ↗'); a.href = body.url; a.target = '_blank'; a.rel = 'noopener'; out.append(a); }
     $('text').value = '';
+    if (path === '/api/command') load();
   } catch (e) {
     out.className = 'result bad'; out.textContent = `Failed: ${e.message}`;
   } finally {

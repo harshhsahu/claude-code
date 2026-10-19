@@ -1,0 +1,39 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "NODE_USE_ENV_PROXY=1 node \"$CLAUDE_PROJECT_DIR/tools/wa-hook.mjs\" stop",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "NODE_USE_ENV_PROXY=1 node \"$CLAUDE_PROJECT_DIR/tools/wa-hook.mjs\" ask",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "NODE_USE_ENV_PROXY=1 node \"$CLAUDE_PROJECT_DIR/tools/wa-hook.mjs\" notify",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

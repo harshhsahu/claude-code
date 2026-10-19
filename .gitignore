@@ -1,3 +1,5 @@
 node_modules
 .env
 relay/.env
+relay/sessions.json
+relay/sessions.json.tmp

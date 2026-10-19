@@ -1,8 +1,12 @@
 // WhatsApp (MSG91 inbound webhook) -> Claude Code cloud session relay.
 // Zero dependencies. Run: node relay/server.js  (env: see relay/.env.example)
 //
-// MODE=session : forwards each message into ONE long-lived cloud session via
-//                `claude -p "<msg>" --cloud $CLAUDE_SESSION_ID` (keeps context).
+// MODE=session : each allowed number gets its OWN long-lived cloud session
+//                (keeps context per person). The number -> session map is saved
+//                in SESSIONS_FILE. Follow-ups go via `claude -p "<msg>" --cloud <id>`.
+//                A number's first message creates its session: through the routine
+//                /fire endpoint if ROUTINE_FIRE_URL is set (documented to return
+//                the session id), otherwise `claude -p --cloud "<msg>"`.
 //                Needs the claude CLI installed here and `claude auth login` done.
 // MODE=routine : POSTs each message to a routine's /fire endpoint. Every message
 //                starts a fresh session (no memory between commands).
@@ -14,7 +18,9 @@
 
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, rename } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { sendText } from '../tools/msg91.mjs';
 
 const {
@@ -23,7 +29,8 @@ const {
   WEBHOOK_SECRET,               // MSG91 webhook URL must be https://host/wa/<WEBHOOK_SECRET>
   ALLOWED_NUMBERS = '',         // comma-separated, digits only, e.g. 919812345678
   MODE = 'session',
-  CLAUDE_SESSION_ID,
+  CLAUDE_SESSION_ID,            // optional: existing session to use for the first allowed number
+  SESSIONS_FILE = fileURLToPath(new URL('./sessions.json', import.meta.url)),
   ROUTINE_FIRE_URL,
   ROUTINE_TOKEN,
   ROUTINE_BETA = 'experimental-cc-routine-2026-04-01',
@@ -33,9 +40,28 @@ const {
 if (!WEBHOOK_SECRET || WEBHOOK_SECRET.length < 16) throw new Error('WEBHOOK_SECRET (16+ chars) is required');
 const allowed = new Set(ALLOWED_NUMBERS.split(',').map((n) => n.replace(/\D/g, '')).filter(Boolean));
 if (!allowed.size) throw new Error('ALLOWED_NUMBERS is required: anyone else could run commands as you');
-if (MODE === 'session' && !CLAUDE_SESSION_ID) throw new Error('CLAUDE_SESSION_ID is required in session mode');
+if (!['session', 'routine'].includes(MODE)) throw new Error('MODE must be session or routine');
 if (MODE === 'routine' && !(ROUTINE_FIRE_URL && ROUTINE_TOKEN)) throw new Error('ROUTINE_FIRE_URL and ROUTINE_TOKEN are required in routine mode');
 const owner = [...allowed][0];
+
+// number -> { id, url, createdAt, lastUsedAt }
+let sessions = {};
+try { sessions = JSON.parse(readFileSync(SESSIONS_FILE, 'utf8')); } catch {}
+if (CLAUDE_SESSION_ID && !sessions[owner]) {
+  sessions[owner] = { id: CLAUDE_SESSION_ID, url: `https://claude.ai/code/${CLAUDE_SESSION_ID}`, createdAt: Date.now() };
+}
+async function saveSessions() {
+  const tmp = `${SESSIONS_FILE}.tmp`;
+  await writeFile(tmp, JSON.stringify(sessions, null, 2));
+  await rename(tmp, SESSIONS_FILE);
+}
+// One queue per number, so two quick messages can't create two sessions.
+const queues = new Map();
+function serial(number, fn) {
+  const next = (queues.get(number) || Promise.resolve()).catch(() => {}).then(fn);
+  queues.set(number, next);
+  return next;
+}
 
 const seen = new Map(); // message id -> ts, drops webhook retries
 const tryJSON = (s) => { try { return typeof s === 'string' ? JSON.parse(s) : s; } catch { return s; } };
@@ -81,29 +107,73 @@ function wrap(from, text) {
     `[WhatsApp command from +${from}]`,
     text,
     '',
-    `When finished, report the result to me on WhatsApp by running: node tools/wa-reply.mjs --to ${from} "<short summary>"`,
-    '(pipe long output: <cmd> | node tools/wa-reply.mjs --to ' + from + ')',
+    '(Your final message is sent to this person on WhatsApp automatically. See CLAUDE.md.)',
   ].join('\n');
 }
 
-function toSession(msg) {
+function runClaude(args) {
   return new Promise((resolve, reject) => {
-    const p = spawn('claude', ['-p', msg, '--cloud', CLAUDE_SESSION_ID, '--output-format', 'json'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const p = spawn('claude', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     p.stdout.on('data', (d) => (out += d));
     p.stderr.on('data', (d) => (err += d));
     p.on('error', reject);
-    p.on('close', (code) => {
-      const r = tryJSON(out.trim());
-      if (code === 0 && (r?.ok ?? true)) resolve(r?.url || 'queued');
-      else reject(new Error(r?.error || err.trim() || `claude exited ${code}`));
-    });
+    p.on('close', (code) => resolve({ code, out: out.trim(), err: err.trim() }));
   });
 }
 
-async function toRoutine(msg) {
+const SESSION_ID = /\b((?:session|cse)_[A-Za-z0-9]{8,})\b/;
+
+// Queue a message into an existing session.
+async function sendToSession(id, msg) {
+  const { code, out, err } = await runClaude(['-p', msg, '--cloud', id, '--output-format', 'json']);
+  const r = tryJSON(out);
+  if (code === 0 && (r?.ok ?? true)) return r?.url || `https://claude.ai/code/${id}`;
+  const e = new Error(r?.error || err || `claude exited ${code}`);
+  e.gone = /not found|archived/i.test(e.message);
+  throw e;
+}
+
+// Start a new session whose first message is `msg`. Returns { id, url }.
+async function createSession(msg) {
+  if (ROUTINE_FIRE_URL && ROUTINE_TOKEN) {
+    const body = await fireRoutine(msg);
+    if (!body.claude_code_session_id) throw new Error('routine fire returned no session id');
+    return { id: body.claude_code_session_id, url: body.claude_code_session_url };
+  }
+  const { code, out, err } = await runClaude(['-p', '--cloud', msg, '--output-format', 'json']);
+  const r = tryJSON(out);
+  const id = r?.session_id || (out + '\n' + err).match(SESSION_ID)?.[1];
+  if (code !== 0 || !id) {
+    throw new Error(`could not create a cloud session (${r?.error || err || out || `exit ${code}`}). ` +
+      'Set ROUTINE_FIRE_URL/ROUTINE_TOKEN, or paste a session ID for this number in the dashboard.');
+  }
+  return { id, url: r?.url || `https://claude.ai/code/${id}` };
+}
+
+function toSession(number, msg) {
+  return serial(number, async () => {
+    const s = sessions[number];
+    if (s) {
+      try {
+        const url = await sendToSession(s.id, msg);
+        s.lastUsedAt = Date.now();
+        await saveSessions();
+        return url;
+      } catch (e) {
+        if (!e.gone) throw e;
+        log('session', { from: number, text: `Session ${s.id} is gone (${e.message}); starting a new one` });
+      }
+    }
+    const created = await createSession(msg);
+    sessions[number] = { ...created, createdAt: Date.now(), lastUsedAt: Date.now() };
+    await saveSessions();
+    log('session', { from: number, text: `New session ${created.id}`, url: created.url });
+    return created.url;
+  });
+}
+
+async function fireRoutine(msg) {
   const res = await fetch(ROUTINE_FIRE_URL, {
     method: 'POST',
     headers: {
@@ -116,11 +186,15 @@ async function toRoutine(msg) {
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`routine fire ${res.status}: ${JSON.stringify(body).slice(0, 300)}`);
-  return body.claude_code_session_url;
+  return body;
+}
+
+async function toRoutine(msg) {
+  return (await fireRoutine(msg)).claude_code_session_url;
 }
 
 async function forward(from, text, source) {
-  const url = MODE === 'routine' ? await toRoutine(wrap(from, text)) : await toSession(wrap(from, text));
+  const url = MODE === 'routine' ? await toRoutine(wrap(from, text)) : await toSession(from, wrap(from, text));
   stats.forwarded++;
   log('forwarded', { from, text, source, url: url && url !== 'queued' ? url : null });
   return url;
@@ -146,8 +220,26 @@ async function handle({ from, text, id }) {
     return log('reply', { to: from, text: 'pong' });
   }
   if (/^\/help$/i.test(text)) {
-    await sendText(from, 'Send any instruction and it goes to Claude.\n/ping - check relay\n/help - this text');
+    await sendText(from, [
+      'Send any instruction and it goes to your Claude session.',
+      '/session - link to your current session',
+      '/new - start a fresh session with your next message',
+      '/ping - check the relay',
+      '/help - this text',
+    ].join('\n'));
     return log('reply', { to: from, text: 'help' });
+  }
+  if (/^\/session$/i.test(text)) {
+    const s = sessions[from];
+    const reply = s ? `Your session: ${s.url}` : 'No session yet. Your next message starts one.';
+    await sendText(from, reply);
+    return log('reply', { to: from, text: reply });
+  }
+  if (/^\/new$/i.test(text)) {
+    await serial(from, async () => { delete sessions[from]; await saveSessions(); });
+    await sendText(from, 'OK. Your next message starts a fresh Claude session.');
+    log('session', { from, text: 'Session reset from WhatsApp' });
+    return log('reply', { to: from, text: 'session reset' });
   }
 
   try {
@@ -218,8 +310,7 @@ http
     if (req.method === 'GET' && path === '/api/state') {
       return send(res, 200, {
         mode: MODE,
-        session: MODE === 'session' ? CLAUDE_SESSION_ID : null,
-        sessionUrl: MODE === 'session' ? `https://claude.ai/code/${CLAUDE_SESSION_ID}` : null,
+        numbers: [...allowed].map((n) => ({ key: n.slice(-4), label: mask(n), session: sessions[n] || null })),
         allowed: [...allowed].map(mask),
         msg91: Boolean(process.env.MSG91_AUTHKEY && process.env.MSG91_INTEGRATED_NUMBER),
         businessNumber: process.env.MSG91_INTEGRATED_NUMBER ? mask(process.env.MSG91_INTEGRATED_NUMBER) : null,
@@ -240,17 +331,32 @@ http
       if (req.headers['x-relay-ui'] !== '1') return send(res, 403, { error: 'missing x-relay-ui header' });
       let body;
       try { body = await readJSON(req); } catch { return send(res, 400, { error: 'bad JSON' }); }
+      // The UI only ever sees the last 4 digits; map them back to a full allowed number.
+      const target = body.to ? [...allowed].find((n) => n.endsWith(String(body.to))) : owner;
+      if (!target) return send(res, 400, { error: 'unknown number' });
+
+      if (path === '/api/session') {
+        const id = String(body.id || '').trim().match(SESSION_ID)?.[1];
+        await serial(target, async () => {
+          if (id) sessions[target] = { id, url: `https://claude.ai/code/${id}`, createdAt: Date.now() };
+          else delete sessions[target];
+          await saveSessions();
+        });
+        log('session', { from: target, text: id ? `Session set to ${id} from dashboard` : 'Session reset from dashboard', source: 'dashboard' });
+        return send(res, 200, { ok: true });
+      }
+
       const text = String(body.text || '').trim();
       if (!text) return send(res, 400, { error: 'text is required' });
 
       try {
         if (path === '/api/command') {
-          const url = await forward(owner, text, 'dashboard');
+          const url = await forward(target, text, 'dashboard');
           return send(res, 200, { ok: true, url });
         }
         if (path === '/api/test-whatsapp') {
-          await sendText(owner, text);
-          log('reply', { to: owner, text, source: 'dashboard' });
+          await sendText(target, text);
+          log('reply', { to: target, text, source: 'dashboard' });
           return send(res, 200, { ok: true });
         }
       } catch (e) {
